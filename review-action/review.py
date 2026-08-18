@@ -44,11 +44,20 @@ def get_diff(repo_root: Path, base_sha: str, head_sha: str) -> str:
 
 
 def read_agents_md(repo_root: Path) -> str:
-    path = repo_root / "AGENTS.md"
-    if not path.is_file():
+    root_path = repo_root / "AGENTS.md"
+    if not root_path.is_file():
         log("AGENTS.md не найден в корне репозитория, продолжаем без него")
         return ""
-    return path.read_text(encoding="utf-8", errors="replace")
+
+    paths = [root_path] + sorted(
+        p for p in repo_root.rglob("AGENTS.md")
+        if p != root_path and ".git" not in p.parts
+    )
+    parts = []
+    for path in paths:
+        rel = path.relative_to(repo_root)
+        parts.append(f"### {rel}\n\n{path.read_text(encoding='utf-8', errors='replace')}")
+    return "\n\n".join(parts)
 
 
 def read_specs(repo_root: Path) -> str:
@@ -73,7 +82,7 @@ def build_user_message(diff: str, agents_md: str, specs_text: str, tools_enabled
     sections = [
         "## Diff (BASE...HEAD)",
         ("```diff\n" + diff + "\n```") if diff else "(пусто)",
-        "## AGENTS.md (корень репозитория)",
+        "## AGENTS.md (все уровни репозитория)",
         agents_md if agents_md else "(файл отсутствует)",
         "## Спецификации из specs/",
         specs_text if specs_text else "(папка specs/ отсутствует или пуста)",
@@ -205,15 +214,46 @@ def run_tool_call(call: dict, ctx: dict) -> str:
 
 # --- вызов модели --------------------------------------------------------
 
-def call_openrouter(messages: list, tools: list | None, api_key: str, model: str) -> dict:
-    payload = {"model": model, "messages": messages, "temperature": 0.2}
+def new_usage() -> dict:
+    return {"prompt_tokens": 0, "completion_tokens": 0, "cost": 0.0, "calls": 0}
+
+
+def format_cost(cost: float) -> str:
+    if cost <= 0:
+        return "$0"
+    return f"${cost:.5f}" if cost < 0.01 else f"${cost:.4f}"
+
+
+def format_usage(usage: dict) -> str:
+    tokens = usage["prompt_tokens"] + usage["completion_tokens"]
+    return f"{usage['calls']} вызов(ов) модели, {tokens} токенов, {format_cost(usage['cost'])}"
+
+
+def call_openrouter(messages: list, tools: list | None, api_key: str, model: str, usage: dict) -> dict:
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.2,
+        "usage": {"include": True},
+    }
     if tools:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     response = requests.post(OPENROUTER_URL, headers=headers, json=payload, timeout=90)
     response.raise_for_status()
-    return response.json()
+    data = response.json()
+
+    call_usage = data.get("usage") or {}
+    usage["prompt_tokens"] += call_usage.get("prompt_tokens", 0) or 0
+    usage["completion_tokens"] += call_usage.get("completion_tokens", 0) or 0
+    usage["cost"] += call_usage.get("cost", 0) or 0
+    usage["calls"] += 1
+    log(
+        f"  [токены: {call_usage.get('prompt_tokens', 0)}+{call_usage.get('completion_tokens', 0)}, "
+        f"{format_cost(call_usage.get('cost', 0) or 0)}, итого по ревью: {format_usage(usage)}]"
+    )
+    return data
 
 
 def parse_findings(text: str) -> list[dict]:
@@ -243,7 +283,7 @@ def parse_findings(text: str) -> list[dict]:
 
 # --- агентный цикл ---------------------------------------------------------
 
-def run_review() -> list[dict]:
+def run_review(usage: dict) -> list[dict]:
     repo_root = Path(os.environ.get("REPO_PATH", os.getcwd())).resolve()
     api_key = os.environ["OPENROUTER_API_KEY"]
     model = os.environ["OPENROUTER_MODEL"]
@@ -268,7 +308,7 @@ def run_review() -> list[dict]:
 
     if single_shot:
         log("режим SINGLE_SHOT: один запрос без инструментов")
-        response = call_openrouter(messages, None, api_key, model)
+        response = call_openrouter(messages, None, api_key, model, usage)
         final_content = response["choices"][0]["message"].get("content") or ""
         return parse_findings(final_content)
 
@@ -278,7 +318,7 @@ def run_review() -> list[dict]:
 
     for iteration in range(1, MAX_ITERATIONS + 1):
         log(f"итерация {iteration}/{MAX_ITERATIONS}: запрос к модели")
-        response = call_openrouter(messages, tools, api_key, model)
+        response = call_openrouter(messages, tools, api_key, model, usage)
         message = response["choices"][0]["message"]
         messages.append(message)
         tool_calls = message.get("tool_calls") or []
@@ -302,7 +342,7 @@ def run_review() -> list[dict]:
                 ),
             }
         )
-        response = call_openrouter(messages, None, api_key, model)
+        response = call_openrouter(messages, None, api_key, model, usage)
         final_content = response["choices"][0]["message"].get("content") or ""
 
     return parse_findings(final_content)
@@ -310,18 +350,20 @@ def run_review() -> list[dict]:
 
 # --- вывод и постинг в PR ---------------------------------------------------
 
-def build_comment(findings: list[dict] | None) -> str:
+def build_comment(findings: list[dict] | None, usage: dict) -> str:
     header = "## Автоматическое ревью (ИИ-агент)"
+    footer = f"\n---\n_{format_usage(usage)}_\n" if usage["calls"] else ""
 
     if findings is None:
         return (
             f"{header}\n\n"
             "Ревьюер не смог завершить проверку из-за внутренней ошибки. "
             "Подробности — в логе джобы `AI review`."
+            f"{footer}"
         )
 
     if not findings:
-        return f"{header}\n\nЗамечаний нет."
+        return f"{header}\n\nЗамечаний нет.{footer}"
 
     grouped: dict[str, list[dict]] = {}
     for item in findings:
@@ -345,7 +387,7 @@ def build_comment(findings: list[dict] | None) -> str:
             lines.append(f"- `{location}` — {comment}{suffix}")
         lines.append("")
 
-    return "\n".join(lines).rstrip() + "\n"
+    return "\n".join(lines).rstrip() + "\n" + footer
 
 
 def post_comment(body: str) -> None:
@@ -360,15 +402,17 @@ def post_comment(body: str) -> None:
 
 
 def main() -> None:
+    usage = new_usage()
     findings = None
     try:
-        findings = run_review()
+        findings = run_review(usage)
         log(f"собрано находок: {len(findings)}")
     except Exception:
         log("ОШИБКА в ходе ревью:")
         log(traceback.format_exc())
 
-    comment = build_comment(findings)
+    log(f"итоговая стоимость ревью: {format_usage(usage)}")
+    comment = build_comment(findings, usage)
     try:
         post_comment(comment)
     except Exception:
