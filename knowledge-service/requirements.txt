@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+pydantic
+psycopg2-binary
+pgvector
+sentence-transformers
+httpx
+mcp
