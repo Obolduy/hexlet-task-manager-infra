@@ -41,6 +41,12 @@ def search(request: SearchRequest) -> list[SearchResult]:
     embedding = model.encode(f"query: {request.query}", normalize_embeddings=True)
 
     conn = psycopg2.connect(DATABASE_URL)
+    with conn.cursor() as cur:
+        # соединение идёт через PgBouncer (transaction pooling) на пути к
+        # Supabase; search_path пришедшего соединения не гарантирован, а
+        # расширение vector у Supabase живёт в схеме extensions, не public —
+        # без явного SET register_vector() иногда не находит тип
+        cur.execute("set search_path to public, extensions")
     register_vector(conn)
     try:
         with conn.cursor() as cur:
