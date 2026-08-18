@@ -1,0 +1,44 @@
+name: 'AI PR review'
+description: >-
+  Агентное ревью PR: правила из AGENTS.md, спецификации из specs/ и,
+  опционально, продуктовые знания через search_docs. Только читает —
+  не блокирует сборку. Чекаут в вызывающем workflow должен быть с
+  fetch-depth: 0, иначе git diff между базовой веткой и веткой PR не сработает.
+inputs:
+  api-key:
+    description: 'API-ключ OpenRouter для модели-ревьюера'
+    required: true
+  search-url:
+    description: >-
+      Базовый URL сервиса семантического поиска (POST {search-url}/search).
+      Если не задан, ревьюер работает без search_docs.
+    required: false
+    default: ''
+  model:
+    description: 'Идентификатор модели OpenRouter, например anthropic/claude-3.5-haiku'
+    required: true
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install review-action dependencies
+      shell: bash
+      run: pip install --quiet -r "${{ github.action_path }}/requirements.txt"
+
+    - name: Run reviewer
+      shell: bash
+      run: python "${{ github.action_path }}/review.py"
+      env:
+        OPENROUTER_API_KEY: ${{ inputs.api-key }}
+        OPENROUTER_MODEL: ${{ inputs.model }}
+        SEARCH_URL: ${{ inputs.search-url }}
+        GITHUB_TOKEN: ${{ github.token }}
+        GITHUB_REPOSITORY: ${{ github.repository }}
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        REPO_PATH: ${{ github.workspace }}
