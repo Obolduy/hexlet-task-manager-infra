@@ -14,7 +14,7 @@ Composite GitHub Action, агентный цикл ИИ-ревью PR. Не за
 - uses: Obolduy/hexlet-task-manager-infra/review-action@main
   with:
     api-key: ${{ secrets.OPENROUTER_API_KEY }}
-    search-url: http://localhost:8000   # или пусто, если search_docs не нужен
+    search-url: http://localhost:8002   # или пусто, если search_docs не нужен
     model: anthropic/claude-sonnet-4.5
 ```
 
@@ -65,11 +65,13 @@ Postgres (pgvector). `mcp_server.py` — MCP-обёртка над тем же
    cd knowledge-service && docker compose up --build
    ```
 
-   `search` слушает `:8000`, `mcp` — `:8001` (streamable-http).
+   `search` слушает `:8002` на хосте (внутри compose-сети — `:8000`, порт
+   поменяли, чтобы не конфликтовать с `api` из `hexlet-task-manager`,
+   который тоже просит `:8000`), `mcp` — `:8001` (streamable-http).
 5. Проверить:
 
    ```bash
-   curl -X POST http://localhost:8000/search \
+   curl -X POST http://localhost:8002/search \
      -H 'Content-Type: application/json' \
      -d '{"query": "можно ли закрыть задачу без ревью"}'
    ```
