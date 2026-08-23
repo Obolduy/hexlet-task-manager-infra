@@ -413,11 +413,16 @@ def main() -> None:
 
     log(f"итоговая стоимость ревью: {format_usage(usage)}")
     comment = build_comment(findings, usage)
-    try:
-        post_comment(comment)
-    except Exception:
-        log("ОШИБКА при публикации комментария:")
-        log(traceback.format_exc())
+
+    if os.environ.get("DRY_RUN") == "1":
+        log("DRY_RUN=1: комментарий не публикуется в GitHub, печатаю здесь")
+        print(comment)
+    else:
+        try:
+            post_comment(comment)
+        except Exception:
+            log("ОШИБКА при публикации комментария:")
+            log(traceback.format_exc())
 
     sys.exit(0)
 
